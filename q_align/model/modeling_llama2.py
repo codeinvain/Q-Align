@@ -34,7 +34,7 @@ def _get_unpad_data(attention_mask):
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
-from .modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+from .modeling_attn_mask_utils import _prepare_4d_causal_attention_mask, _prepare_4d_causal_attention_mask_for_sdpa
 from .configuration_mplug_owl2 import LlamaConfig
 
 class MultiwayNetwork(nn.Module):
@@ -157,7 +157,7 @@ class LlamaAttention(nn.Module):
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
@@ -632,24 +632,24 @@ def model_forward(
         attention_mask = torch.ones(
             (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
         )
-        
-    if self._use_flash_attention_2:
-            # 2d mask is passed through the layers
-            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-    elif self._use_sdpa and not output_attentions:
-            # output_attentions=True can not be supported when using SDPA, and we fall back on
-            # the manual implementation that requires a 4D causal mask in all cases.
-            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                attention_mask,
-                (batch_size, seq_length),
-                inputs_embeds,
-                past_key_values_length,
-            )
+
+    if self.config._attn_implementation == "flash_attention_2":
+        # 2d mask is passed through the layers
+        attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+    elif self.config._attn_implementation == "sdpa" and not output_attentions:
+        # output_attentions=True can not be supported when using SDPA, and we fall back on
+        # the manual implementation that requires a 4D causal mask in all cases.
+        attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+            attention_mask,
+            (batch_size, seq_length),
+            inputs_embeds,
+            past_key_values_length,
+        )
     else:
-            # 4d mask is passed through the layers
-            attention_mask = _prepare_4d_causal_attention_mask(
-                attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
-            )
+        # 4d mask is passed through the layers
+        attention_mask = _prepare_4d_causal_attention_mask(
+            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+        )
 
     hidden_states = inputs_embeds
 
